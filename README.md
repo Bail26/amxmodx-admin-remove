@@ -25,7 +25,7 @@ amx_removeadmin "SomePlayerName"
 
 ## Installation & Usage
 1. Compile `admin.sma` with AMX Mod X Dev 1.9.0 (or any build).
-2. Copy the compiled `.amxx` into `addons/amxmodx/plugins/`.
+2. Replace your originial admin.sma with one into `addons/amxmodx/plugins/`.
 3. From server console (RCON or local console), run:
 ```
 amx_removeadmin "STEAM_1:0:12345678"
