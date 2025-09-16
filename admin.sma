@@ -38,6 +38,7 @@ new bool:g_CaseSensitiveName[MAX_PLAYERS + 1];
 new amx_mode;
 new amx_password_field;
 new amx_default_access;
+new amx_protectflag; //new variable defined for admin protection 
 
 public plugin_init()
 {
@@ -74,6 +75,8 @@ public plugin_init()
 	register_cvar("amx_sql_db", "amx", FCVAR_PROTECTED)
 	register_cvar("amx_sql_type", "mysql", FCVAR_PROTECTED)
 	register_cvar("amx_sql_timeout", "60", FCVAR_PROTECTED)
+
+	register_cvar("amx_protectflag", "a", FCVAR_PROTECTED) // protects immune admins from getting removed
 
 	register_concmd("amx_reloadadmins", "cmdReload", ADMIN_CFG)
 	register_concmd("amx_addadmin", "addadminfn", ADMIN_RCON, "<playername|auth> <accessflags> [password] [authtype] - add specified player as an admin to users.ini")
@@ -808,8 +811,12 @@ public removeadminfn(id, level, cid)
         return PLUGIN_HANDLED;
     }
 
+    // Get protect flag from cvar
+    new protectFlagBuf[8];
+    get_pcvar_string(amx_protectflag, protectFlagBuf, charsmax(protectFlagBuf));
+
     new cfgDir[128];
-    get_configsdir(cfgDir, charsmax(cfgDir));
+    get_configsdir(cfgDir, charsmax(cfgDir)); 
 
     new usersFile[192];
     new tmpFile[192];
@@ -821,6 +828,7 @@ public removeadminfn(id, level, cid)
         return PLUGIN_HANDLED;
     }
 
+    // Ensure temp file does not exist
     if (file_exists(tmpFile)) {
         delete_file(tmpFile);
     }
@@ -829,9 +837,11 @@ public removeadminfn(id, level, cid)
     new textline[512];
     new len;
     new removed = 0;
+    new skippedProtected = 0;
 
     while ((line = read_file(usersFile, line, textline, charsmax(textline), len)))
     {
+        // Keep blank lines and comments
         if (len == 0 || textline[0] == ';') {
             write_file(tmpFile, textline);
             continue;
@@ -845,32 +855,59 @@ public removeadminfn(id, level, cid)
             continue;
         }
 
-        if (equali(auth, target) || equali(textline, target) || equali(flags, target)) {
+        // Check if this admin is protected (has the protect flag in flags string)
+        if (protectFlagBuf[0] != 0 && flags[0] != 0)
+        {
+            if (containi(flags, protectFlagBuf) != -1)
+            {
+                // This account is protected
+                skippedProtected = 1;
+                write_file(tmpFile, textline);
+                continue;
+            }
+        }
+
+        // Match by exact auth (SteamID/IP/name)
+        if (equali(auth, target))
+        {
             removed = 1;
             console_print(id, "[%s] Removed admin entry: %s", PLUGINNAME, auth);
-            continue;
+            continue; // skip writing this line -> removed
         }
 
-        if (equali(textline, target)) {
-            removed = 1;
-            continue;
+        new semipos = contain(textline, ";");
+        if (semipos != -1)
+        {
+            // extract comment (text after ';')
+            new comment[128];
+            copy(comment, charsmax(comment), textline[semipos+1]);
+            trim(comment);
+
+            if (comment[0] && equali(comment, target))
+            {
+                removed = 1;
+                console_print(id, "[%s] Removed admin entry (by comment): %s ; %s", PLUGINNAME, auth, comment);
+                continue;
+            }
         }
 
+        // Not a match — keep the line
         write_file(tmpFile, textline);
     }
 
     if (removed)
     {
+        // replace original file with temp
         if (!delete_file(usersFile)) {
             console_print(id, "[%s] Failed to delete original file: %s", PLUGINNAME, usersFile);
-            // clean up tmp
-            if (file_exists(tmpFile))
-                delete_file(tmpFile);
+            if (file_exists(tmpFile)) delete_file(tmpFile);
             return PLUGIN_HANDLED;
         }
 
-        if (!rename_file(tmpFile, usersFile, 1)) { // 3rd arg = overwrite
+        if (!rename_file(tmpFile, usersFile, 1)) { // overwrite allowed
             console_print(id, "[%s] Failed to rename temp file to: %s", PLUGINNAME, usersFile);
+            // attempt to clean up
+            if (file_exists(tmpFile)) delete_file(tmpFile);
             return PLUGIN_HANDLED;
         }
 
@@ -879,9 +916,14 @@ public removeadminfn(id, level, cid)
     }
     else
     {
-        if (file_exists(tmpFile))
-            delete_file(tmpFile);
-        console_print(id, "[%s] Admin '%s' not found in users.ini", PLUGINNAME, target);
+        // No removal occurred
+        if (file_exists(tmpFile)) delete_file(tmpFile);
+
+        if (skippedProtected) {
+            console_print(id, "[%s] Admin '%s' not removed because the account is protected.", PLUGINNAME, target, protectFlagBuf);
+        } else {
+            console_print(id, "[%s] Admin '%s' not found in users.ini", PLUGINNAME, target);
+        }
     }
 
     return PLUGIN_HANDLED;
