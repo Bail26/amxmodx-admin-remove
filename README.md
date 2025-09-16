@@ -1,6 +1,6 @@
 # AMX Mod X — Console `amx_removeadmin` Utility
 
-This plugin replaces your exisiting admin.amxx and adds a console command to remove an admin entry (by SteamID / IP / name fragment)
+This plugin replaces your exisiting admin.amxx and adds a console command to remove an admin entry (non-immune) (by SteamID / IP / name fragment)
 from the AMX Mod X admins file and requests a reload of the admin list so changes take effect immediately.
 
 **Command (console-only):**
