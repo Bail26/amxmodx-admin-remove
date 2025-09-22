@@ -38,7 +38,9 @@ new bool:g_CaseSensitiveName[MAX_PLAYERS + 1];
 new amx_mode;
 new amx_password_field;
 new amx_default_access;
-new amx_protectflag; //new variable defined for admin protection 
+new amx_protect_flag;    // handle for the CVAR
+
+#define REMOVEADMIN_DEBUG 0
 
 public plugin_init()
 {
@@ -52,6 +54,8 @@ public plugin_init()
 	amx_mode=register_cvar("amx_mode", "1", FCVAR_PROTECTED)
 	amx_password_field=register_cvar("amx_password_field", "_pw", FCVAR_PROTECTED)
 	amx_default_access=register_cvar("amx_default_access", "", FCVAR_PROTECTED)
+
+	amx_protect_flag = register_cvar("amx_protect_flag", "a", FCVAR_PROTECTED);
 
 	register_cvar("amx_vote_ratio", "0.02")
 	register_cvar("amx_vote_time", "10")
@@ -76,11 +80,9 @@ public plugin_init()
 	register_cvar("amx_sql_type", "mysql", FCVAR_PROTECTED)
 	register_cvar("amx_sql_timeout", "60", FCVAR_PROTECTED)
 
-	register_cvar("amx_protectflag", "a", FCVAR_PROTECTED) // protects immune admins from getting removed
-
 	register_concmd("amx_reloadadmins", "cmdReload", ADMIN_CFG)
 	register_concmd("amx_addadmin", "addadminfn", ADMIN_RCON, "<playername|auth> <accessflags> [password] [authtype] - add specified player as an admin to users.ini")
-	register_concmd("amx_removeadmin", "removeadminfn", ADMIN_RCON, "<auth|steamid|ip|name> - remove admin")  // new admin console command
+	register_concmd("amx_removeadmin", "removeadminfn", ADMIN_RCON, "<auth|steamid|ip|name> - remove admin");
 	remove_user_flags(0, read_flags("z"))		// Remove 'user' flag from server rights
 
 	new configsDir[64]
@@ -811,12 +813,19 @@ public removeadminfn(id, level, cid)
         return PLUGIN_HANDLED;
     }
 
-    // Get protect flag from cvar
-    new protectFlagBuf[8];
-    get_pcvar_string(amx_protectflag, protectFlagBuf, charsmax(protectFlagBuf));
+    new protectFlagBuf[16];
+    if (amx_protect_flag != 0) {
+        get_pcvar_string(amx_protect_flag, protectFlagBuf, charsmax(protectFlagBuf));
+        if (protectFlagBuf[0] == 0) {
+            copy(protectFlagBuf, charsmax(protectFlagBuf), "a");
+        }
+    } else {
+        copy(protectFlagBuf, charsmax(protectFlagBuf), "a");
+    }
 
+    // Build file paths
     new cfgDir[128];
-    get_configsdir(cfgDir, charsmax(cfgDir)); 
+    get_configsdir(cfgDir, charsmax(cfgDir));
 
     new usersFile[192];
     new tmpFile[192];
@@ -828,7 +837,6 @@ public removeadminfn(id, level, cid)
         return PLUGIN_HANDLED;
     }
 
-    // Ensure temp file does not exist
     if (file_exists(tmpFile)) {
         delete_file(tmpFile);
     }
@@ -841,86 +849,107 @@ public removeadminfn(id, level, cid)
 
     while ((line = read_file(usersFile, line, textline, charsmax(textline), len)))
     {
-        // Keep blank lines and comments
+        // keep blank/comment lines
         if (len == 0 || textline[0] == ';') {
             write_file(tmpFile, textline);
             continue;
         }
 
+        // parse: auth password access flags
         new auth[128], pass[128], access[64], flags[128];
         new parsed = parse(textline, auth, charsmax(auth), pass, charsmax(pass), access, charsmax(access), flags, charsmax(flags));
 
+        // If parse failed, copy as-is
         if (parsed < 1 || auth[0] == 0) {
             write_file(tmpFile, textline);
             continue;
         }
 
-        // Check if this admin is protected (has the protect flag in flags string)
-        if (protectFlagBuf[0] != 0 && flags[0] != 0)
-        {
-            if (containi(flags, protectFlagBuf) != -1)
-            {
-                // This account is protected
-                skippedProtected = 1;
-                write_file(tmpFile, textline);
-                continue;
+        // Normalize flags: trim, remove surrounding quotes if any
+        trim(flags);
+        if (flags[0] == '"') {
+            // remove leading quote
+            new tmpbuf[128];
+            copy(tmpbuf, charsmax(tmpbuf), flags[1]);
+            // simpler approach: shift left over the first quote until closing quote or end
+            new k = 0;
+            for (new i = 1; i < strlen(flags); i++) {
+                if (flags[i] == '"') {
+                    tmpbuf[k] = 0;
+                    break;
+                }
+                tmpbuf[k++] = flags[i];
             }
+            tmpbuf[k] = 0;
+            copy(flags, charsmax(flags), tmpbuf);
         }
+        trim(flags);
 
-        // Match by exact auth (SteamID/IP/name)
-        if (equali(auth, target))
-        {
-            removed = 1;
-            console_print(id, "[%s] Removed admin entry: %s", PLUGINNAME, auth);
-            continue; // skip writing this line -> removed
-        }
+        // Debug: show parsed values if enabled
+        #if REMOVEADMIN_DEBUG
+        console_print(id, "[DBG] Line auth=\"%s\" flags=\"%s\" parsed=%d", auth, flags, parsed);
+        #endif
 
-        new semipos = contain(textline, ";");
-        if (semipos != -1)
-        {
-            // extract comment (text after ';')
-            new comment[128];
+		new isProtected = 0;
+		if (protectFlagBuf[0] != 0 && access[0] != 0) {
+			for (new p = 0; p < strlen(protectFlagBuf); p++) {
+				new pf = protectFlagBuf[p];
+				for (new q = 0; q < strlen(access); q++) {
+					if (access[q] == pf) {      // match single character
+						isProtected = 1;
+						break;
+					}
+				}
+				if (isProtected) break;
+			}
+		}
+
+		if (isProtected) {
+			skippedProtected = 1;
+			write_file(tmpFile, textline); // keep this line
+			continue;
+		}
+
+		// Match by exact auth
+		if (equali(auth, target)) {
+			removed = 1;
+			console_print(id, "[%s] Removed admin entry: %s", PLUGINNAME, auth);
+			continue; // don't write, effectively remove
+		}
+
+		// Match by comment name after ';'
+		new semipos = contain(textline, ";");
+        if (semipos != -1) {
+            new comment[192];
             copy(comment, charsmax(comment), textline[semipos+1]);
             trim(comment);
-
-            if (comment[0] && equali(comment, target))
-            {
+            if (comment[0] && equali(comment, target)) {
                 removed = 1;
                 console_print(id, "[%s] Removed admin entry (by comment): %s ; %s", PLUGINNAME, auth, comment);
                 continue;
             }
         }
 
-        // Not a match — keep the line
+        // not affected, keep line
         write_file(tmpFile, textline);
     }
 
-    if (removed)
-    {
-        // replace original file with temp
+    if (removed) {
         if (!delete_file(usersFile)) {
             console_print(id, "[%s] Failed to delete original file: %s", PLUGINNAME, usersFile);
             if (file_exists(tmpFile)) delete_file(tmpFile);
             return PLUGIN_HANDLED;
         }
-
-        if (!rename_file(tmpFile, usersFile, 1)) { // overwrite allowed
+        if (!rename_file(tmpFile, usersFile, 1)) {
             console_print(id, "[%s] Failed to rename temp file to: %s", PLUGINNAME, usersFile);
-            // attempt to clean up
             if (file_exists(tmpFile)) delete_file(tmpFile);
             return PLUGIN_HANDLED;
         }
-
-        // Reload admins
         cmdReload(id, ADMIN_CFG, 0);
-    }
-    else
-    {
-        // No removal occurred
+    } else {
         if (file_exists(tmpFile)) delete_file(tmpFile);
-
         if (skippedProtected) {
-            console_print(id, "[%s] Admin '%s' not removed because the account is protected.", PLUGINNAME, target, protectFlagBuf);
+            console_print(id, "[%s] Admin '%s' not removed because the account is protected (flag(s) '%s' present).", PLUGINNAME, target, protectFlagBuf);
         } else {
             console_print(id, "[%s] Admin '%s' not found in users.ini", PLUGINNAME, target);
         }
